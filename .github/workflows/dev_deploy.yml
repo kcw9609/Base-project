@@ -1,0 +1,101 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ develop ]  # develop 브랜치에 push가 일어날 때 실행
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3  # 저장소 코드 체크아웃
+
+      - name: Set up JDK 17  # Java 개발 킷 설정
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+#      - name: Make application.yml  # application.yml 파일 생성
+#        run: |
+#          cd ./src/main/resources
+#          echo "${{ secrets.APPLICATION_YML }}" > ./application.yml
+#          echo "${{ secrets.APPLICATION_DATABASE_YML }}" > ./application-database.yml
+#          echo "${{ secrets.APPLICATION_DISCORD_YML }}" > ./application-discord.yml
+#        shell: bash
+
+      - name: Grant execute permission for gradlew  # gradlew 실행 권한 부여
+        run: chmod +x gradlew
+
+      - name: Build without Tests  # 테스트 제외하고 빌드
+        run: ./gradlew build -x test
+
+      - name: Upload build artifact  # 빌드된 아티팩트 업로드
+        uses: actions/upload-artifact@v4 # 버전 오류로 v3 -> v4
+        with:
+          name: umc7thServer
+          path: build/libs/*.jar
+
+  deploy:
+    needs: build  # build 작업이 성공적으로 완료된 후 실행
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download build artifact  # 이전 단계에서 업로드한 아티팩트 다운로드
+        uses: actions/download-artifact@v4 # 버전 오류로 v3 -> v4
+        with:
+          name: umc7thServer
+          path: build/libs/
+
+      - name: Deploy to EC2 Configure RDS Connection  # EC2에 배포 및 RDS 연동 설정
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          RDS_USERNAME: ${{ secrets.RDS_USERNAME }}
+          RDS_PASSWORD: ${{ secrets.RDS_PASSWORD }}
+          RDS_HOST: ${{ secrets.RDS_HOST }}
+          RDS_DB_NAME: ${{ secrets.RDS_DB_NAME }}
+          DISCORD_URL: ${{ secrets.DISCORD_URL }}
+          REDIS_HOST: ${{ secrets.REDIS_HOST }}
+          REDIS_PORT: ${{ secrets.REDIS_PORT }}
+          REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
+          EMAIL_USERNAME: ${{ secrets.EMAIL_USERNAME }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          JWT_SECRET_KEY: ${{ secrets.JWT_SECRET_KEY }}
+        run: |
+          echo "$EC2_SSH_KEY" > private_key.pem
+          chmod 600 private_key.pem
+          
+          # 기존 JAR 파일과 해시 비교
+          jar_file=$(find build/libs -name '*.jar' ! -name '*plain.jar' | head -n 1)
+          local_hash=$(sha256sum "$jar_file" | cut -d ' ' -f 1)
+          remote_hash=$(ssh -i private_key.pem -o StrictHostKeyChecking=no $EC2_USERNAME@$EC2_HOST "sha256sum /home/$EC2_USERNAME/umc7thServer.jar 2>/dev/null | cut -d ' ' -f 1" || echo "none")
+
+          if [ "$remote_hash" = "none" ] || [ "$local_hash" != "$remote_hash" ]; then
+            echo "Uploading new JAR file to EC2..."
+            rsync -avz --progress -e "ssh -i private_key.pem -o StrictHostKeyChecking=no" "$jar_file" $EC2_USERNAME@$EC2_HOST:/home/$EC2_USERNAME/umc7thServer.jar
+          else
+            echo "JAR file is unchanged. Skipping upload."
+          fi
+          
+          ssh -i private_key.pem -o StrictHostKeyChecking=no $EC2_USERNAME@$EC2_HOST "
+            # 기존 프로세스 종료
+            pgrep java | xargs -r kill -15
+            sleep 10
+          
+            nohup java -Dspring.profiles.active=dev \
+              -DDB_URL=jdbc:mysql://${RDS_HOST}:3306/${RDS_DB_NAME} \
+              -DDB_USERNAME=$RDS_USERNAME \
+              -DDB_PASSWORD=$RDS_PASSWORD \
+              -DDISCORD_URL=$DISCORD_URL \
+              -DREDIS_HOST=$REDIS_HOST \
+              -DREDIS_PORT=$REDIS_PORT \
+              -DREDIS_PASSWORD=$REDIS_PASSWORD \
+              -DEMAIL_USERNAME=$EMAIL_USERNAME \
+              -DEMAIL_PASSWORD=$EMAIL_PASSWORD \
+              -DJWT_SECRET_KEY=$JWT_SECRET_KEY \
+              -jar /home/$EC2_USERNAME/umc7thServer.jar > app.log 2>&1 &  # 새 버전 애플리케이션 실행
+          "
+          rm -f private_key.pem  # 민감한 정보 삭제

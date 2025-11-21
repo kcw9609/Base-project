@@ -1,0 +1,37 @@
+server:
+  port: 8080
+
+spring:
+  config:
+    activate:
+      on-profile: local
+  h2:
+    console:
+      enabled: true
+
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    username: ${LOCAL_DB_USERNAME}
+    password: ${LOCAL_DB_PASSWORD}
+    url: ${LOCAL_DB_URL}
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 10
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    properties:
+      hibernate:
+        show_sql: true
+        format_sql: true
+    defer-datasource-initialization: true
+logging:
+  level:
+    root: info
+
+    # 시큐리티 전반
+    org.springframework.security: DEBUG
+
+    # 우리 앱 패키지
+    com.team: DEBUG
